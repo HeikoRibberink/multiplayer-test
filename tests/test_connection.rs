@@ -1,14 +1,16 @@
+#![cfg(test)]
 use bevy::prelude::*;
 use multiplayer_test::{
 	self,
 	client::{Client, ClientPlugin, FromClient},
 };
 use tokio::net::TcpListener;
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn basic_connection() -> Result<(), Box<dyn std::error::Error>> {
 	let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_io().build()?;
-	let handle = rt.spawn(async {
+	let _handle = rt.spawn(async {
 		let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-		while let Ok((stream, addr)) = listener.accept().await {
+		while let Ok((_stream, addr)) = listener.accept().await {
 			println!("Connected: {}", addr);
 		}
 	});
@@ -28,7 +30,7 @@ pub fn setup(mut client: ResMut<Client>) {
 	client.connect("127.0.0.1:8080".parse().unwrap()).unwrap();
 }
 
-pub fn on_connect(mut events: EventReader<FromClient>, client: ResMut<Client>) {
+pub fn on_connect(mut events: EventReader<FromClient>) {
 	for ev in events.iter() {
 		dbg!(ev);
 		if let FromClient::Connected = ev {

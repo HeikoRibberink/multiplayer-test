@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 quote = "1.0.21"
 syn = "1.0.101"
+serde = "1.0.145"
 
 [lib]
 proc-macro = true
