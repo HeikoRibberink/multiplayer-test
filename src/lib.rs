@@ -1,36 +1,25 @@
-use std::marker::PhantomData;
-
 use bevy::{prelude::*, utils::Uuid};
-use client::Client;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
 use dashmap::DashMap;
+use rand::Rng;
 
 pub mod client;
+pub mod connection;
 pub mod messaging;
 pub mod server;
 
-#[derive(Default)]
-struct MultiplayerPlugin<T>
-where
-	for<'a> T: Send + Sync + Serialize + Deserialize<'a> + 'static,
-{
-	_m: PhantomData<T>,
-}
+pub struct MultiplayerPlugin;
 
-impl<T> Plugin for MultiplayerPlugin<T>
-where
-	for<'a> T: Send + Sync + Serialize + Deserialize<'a> + 'static,
-{
+impl Plugin for MultiplayerPlugin {
 	fn build(&self, app: &mut App) {
-		app
-		.add_stage_before(CoreStage::Update, NetStage::Receive, SystemStage::parallel())
+		app.add_stage_before(
+			CoreStage::Update,
+			NetStage::Receive,
+			SystemStage::parallel(),
+		)
 		.add_stage_after(CoreStage::Update, NetStage::Send, SystemStage::parallel())
-		.insert_resource(NetEntityRegistry::default())
-		;
+		.insert_resource(NetEntityRegistry::default());
 	}
 }
-
 
 #[derive(StageLabel)]
 pub enum NetStage {
@@ -38,9 +27,11 @@ pub enum NetStage {
 	Send,
 }
 
+pub type EntityUuid = Uuid;
+
 #[derive(Default)]
 pub struct NetEntityRegistry {
-	map: DashMap<Uuid, Entity>,
+	map: DashMap<EntityUuid, Entity>,
 }
 
 impl NetEntityRegistry {

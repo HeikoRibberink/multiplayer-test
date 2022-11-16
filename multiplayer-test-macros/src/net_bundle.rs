@@ -49,7 +49,7 @@ pub fn net_bundle_derive_help(input: DeriveInput) -> Result<TokenStream> {
 		}
 	}
 
-	if netw_fields_ident.len() <= 0 {
+	if netw_fields_ident.len() == 0 {
 		return Err(Error::new(
 			name.span(),
 			"Please mark at least one member with #[networked] to implement NetBundle.",
