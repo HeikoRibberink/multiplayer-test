@@ -5,8 +5,7 @@ use std::sync::{
 
 use async_channel::{unbounded, Receiver, RecvError, SendError, Sender};
 use bevy::utils::Uuid;
-use reflect_steroids::serde::Serialize;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
 	io::{self, AsyncWriteExt, BufReader, BufWriter},
@@ -21,10 +20,10 @@ use tokio::{
 use crate::messaging;
 
 pub mod ext;
-pub mod registry;
 
-pub type ConnectionUuid = Uuid;
+pub type ConnectionId = Uuid;
 
+#[derive(Debug)]
 pub struct ConnectionHandle<S, R>
 where
 	S: Serialize + Send + 'static,
@@ -32,10 +31,10 @@ where
 {
 	to_conn: Sender<S>,
 	from_conn: Receiver<R>,
-	pub uuid: ConnectionUuid,
-	running: Arc<AtomicBool>,
+	pub uuid: ConnectionId,
+	active: Arc<AtomicBool>,
 	runtime: Handle,
-	_task: Option<JoinHandle<Result<(), ConnectionError>>>,
+	task: Option<JoinHandle<Result<(), ConnectionError>>>,
 }
 
 impl<S, R> ConnectionHandle<S, R>
@@ -47,18 +46,18 @@ where
 	where
 		A: ToSocketAddrs + Send + 'static,
 	{
-		let (to_conn, from_handler) = unbounded::<S>();
-		let (to_handler, from_conn) = unbounded::<R>();
+		let (to_conn, from_handle) = unbounded::<S>();
+		let (to_handle, from_conn) = unbounded::<R>();
 
-		let running = Arc::new(AtomicBool::new(true));
+		let active = Arc::new(AtomicBool::new(false));
 
 		let connection = Connection {
-			to_handler,
-			from_handler,
-			running: running.clone(),
+			to_handle,
+			from_handle,
+			active: active.clone(),
 		};
 
-		let _task = Some(rt.spawn(connection.connect(addr)));
+		let task = Some(rt.spawn(connection.connect(addr)));
 
 		let uuid = Uuid::new_v4();
 
@@ -66,9 +65,35 @@ where
 			to_conn,
 			from_conn,
 			uuid,
-			running,
+			active,
 			runtime: rt.clone(),
-			_task,
+			task,
+		}
+	}
+
+	pub fn with_stream(rt: Handle, stream: TcpStream) -> ConnectionHandle<S, R> {
+		let (to_conn, from_handle) = unbounded::<S>();
+		let (to_handle, from_conn) = unbounded::<R>();
+
+		let active = Arc::new(AtomicBool::new(false));
+
+		let connection = Connection {
+			to_handle,
+			from_handle,
+			active: active.clone(),
+		};
+
+		let task = Some(rt.spawn(connection.run(stream)));
+
+		let uuid = Uuid::new_v4();
+
+		Self {
+			to_conn,
+			from_conn,
+			uuid,
+			active,
+			runtime: rt.clone(),
+			task,
 		}
 	}
 
@@ -77,12 +102,12 @@ where
 		self.runtime.block_on(async {
 			//Cancellation safety: should be safe as we don't care about any data that hasn't been send or received after waiting.
 			//Maybe use select! with a branch that waits for a specified time to not wait indefinitely
-			self._task.take().unwrap().await
+			self.task.take().unwrap().await
 		})?
 	}
 
 	fn internal_disconnect(&self) -> Result<(), ConnectionError> {
-		self.running.store(false, Ordering::Relaxed);
+		self.active.store(false, Ordering::Relaxed);
 		if !(self.to_conn.close() & self.from_conn.close()) {
 			return Err(ConnectionError::Disconnected);
 		};
@@ -96,6 +121,10 @@ where
 	pub fn send_blocking(&self, data: S) -> Result<(), ConnectionError> {
 		self.to_conn.send_blocking(data)?;
 		Ok(())
+	}
+
+	pub fn is_active(&self) -> bool {
+		self.active.load(Ordering::Relaxed)
 	}
 
 	pub fn try_recv(&self) -> Result<Option<R>, ConnectionError> {
@@ -116,7 +145,7 @@ where
 	for<'de> R: Deserialize<'de> + Send + 'static,
 {
 	fn drop(&mut self) {
-		if !self.running.load(Ordering::Relaxed) {
+		if !self.active.load(Ordering::Relaxed) {
 			self.internal_disconnect_blocking(); //TODO: how should the connection be ended?
 		}
 	}
@@ -127,9 +156,9 @@ where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + 'static,
 {
-	to_handler: Sender<R>,
-	from_handler: Receiver<S>,
-	running: Arc<AtomicBool>,
+	to_handle: Sender<R>,
+	from_handle: Receiver<S>,
+	active: Arc<AtomicBool>,
 }
 
 impl<S, R> Connection<S, R>
@@ -137,34 +166,34 @@ where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + 'static,
 {
-	async fn connect<A: ToSocketAddrs>(self, addr: A) -> Result<(), ConnectionError> {
-		let stream = TcpStream::connect(addr).await?; 
-
+	async fn run(self, stream: TcpStream) -> Result<(), ConnectionError> {
 		//Split the stream up to be able to split sending and receiving
 		let (read, write) = stream.into_split();
 
 		let mut read = BufReader::new(read);
 		let mut write = BufWriter::new(write);
 
+		self.active.store(true, Ordering::Relaxed);
+
 		//Spawn listening and write tasks.
-		let (read_output, write_output) = tokio::join!(
-			async {
+		let output = tokio::select!(
+			result = async {
 				if let Err(err) = self.listen_to_stream(&mut read).await {
-					self.stop().unwrap() /*?*/; //TODO: is this correct?
+					self.stop()? /*?*/; //TODO: is this correct?
 					Err(err)
 				} else {
 					Ok(())
 				}
-			},
-			async {
+			} => result,
+			result = async {
 				if let Err(err) = self.write_to_stream(&mut write).await {
-					self.stop().unwrap() /*?*/; //TODO: is this correct?
+					self.stop()? /*?*/; //TODO: is this correct?
 					Err(err)
 				} else {
 					Ok(())
 				}
-			},
-		); 
+			} => result,
+		);
 
 		//Reunite halves
 		let mut stream = read
@@ -175,17 +204,22 @@ where
 		stream.shutdown().await?;
 
 		//TODO: unexpected disconnects succesfully stop both threads and get here
-		read_output.and(write_output)
+		output
+	}
+
+	async fn connect<A: ToSocketAddrs>(self, addr: A) -> Result<(), ConnectionError> {
+		let stream = TcpStream::connect(addr).await?;
+		self.run(stream).await
 	}
 
 	async fn write_to_stream(
 		&self,
 		write: &mut BufWriter<OwnedWriteHalf>,
 	) -> Result<(), ConnectionError> {
-		while self.running.load(Ordering::Relaxed) {
-			let Ok(msg) = self.from_handler.recv().await else {
-				// If the channel returns an error and running is true, error.
-				if self.running.load(Ordering::Relaxed) {
+		while self.active.load(Ordering::Relaxed) {
+			let Ok(msg) = self.from_handle.recv().await else {
+				// If the channel returns an error and active is true, error.
+				if self.active.load(Ordering::Relaxed) {
 					return Err(ConnectionError::Disconnected)
 				}
 				// Otherwise, the handler has signaled a disconnect.
@@ -203,13 +237,13 @@ where
 		&self,
 		read: &mut BufReader<OwnedReadHalf>,
 	) -> Result<(), ConnectionError> {
-		while self.running.load(Ordering::Relaxed) {
+		while self.active.load(Ordering::Relaxed) {
 			match messaging::recv_msg(read).await {
 				Ok(bytes) => {
 					let data: R = postcard::from_bytes(&*bytes)?;
-					if let Err(_err) = self.to_handler.send(data).await {
-						// If the channel returns an error and running is true, error.
-						if self.running.load(Ordering::Relaxed) {
+					if let Err(_err) = self.to_handle.send(data).await {
+						// If the channel returns an error and active is true, error.
+						if self.active.load(Ordering::Relaxed) {
 							return Err(ConnectionError::Disconnected);
 						}
 						// Otherwise, the handler has signaled a disconnect.
@@ -226,8 +260,8 @@ where
 	}
 
 	fn stop(&self) -> Result<(), ConnectionError> {
-		self.running.store(false, Ordering::Relaxed);
-		if !(self.to_handler.close() & self.from_handler.close()) {
+		self.active.store(false, Ordering::Relaxed);
+		if !(self.to_handle.close() & self.from_handle.close()) {
 			return Err(ConnectionError::Disconnected);
 		};
 		return Ok(());

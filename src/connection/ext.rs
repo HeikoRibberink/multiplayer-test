@@ -1,17 +1,21 @@
-use bevy::{prelude::EventWriter, utils::Uuid};
+use std::net::SocketAddr;
+
+use bevy::prelude::EventWriter;
 use serde::{Deserialize, Serialize};
 
-use super::{ConnectionError, ConnectionHandle};
+use super::{ConnectionError, ConnectionHandle, ConnectionId};
 
+#[derive(Debug)]
+pub struct ErrorEvent(pub ConnectionError, pub ConnectionId);
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct ConnectionEvent<R>(pub R, pub Uuid);
-
-pub type ConnErrorEvent = ConnectionEvent<ConnectionError>;
+pub struct ConnectedEvent(pub SocketAddr, pub ConnectionId);
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct MessageEvent<R>(pub R, pub ConnectionId);
 
 pub fn emit_messages_as_events<S, R>(
 	handle: &ConnectionHandle<S, R>,
-	data_events: &mut EventWriter<ConnectionEvent<R>>,
-	error_events: &mut EventWriter<ConnectionEvent<ConnectionError>>,
+	connection_messages: &mut EventWriter<MessageEvent<R>>,
+	connection_errors: &mut EventWriter<ErrorEvent>,
 ) where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + Sync + 'static,
@@ -22,9 +26,9 @@ pub fn emit_messages_as_events<S, R>(
 			let Some(val) = opt else {
 				break;
 			};
-			data_events.send(ConnectionEvent(val, handle.uuid));
+			connection_messages.send(MessageEvent(val, handle.uuid));
 		} else if let Err(err) = recv {
-			error_events.send(ConnectionEvent(err, handle.uuid));
+			connection_errors.send(ErrorEvent(err, handle.uuid));
 			break;
 		}
 	}

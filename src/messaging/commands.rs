@@ -31,6 +31,6 @@ pub trait NetCommands<'w, 's> {
 impl<'w, 's> NetCommands<'w, 's> for Commands<'w, 's> {
 	fn spawn_net<'a>(&'a mut self) -> EntityCommands<'w, 's, 'a> {
 		
-		self.spawn()
+		self.spawn_empty()
 	}
 }

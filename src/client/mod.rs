@@ -1,11 +1,15 @@
 use bevy::prelude::*;
 use tokio::net::ToSocketAddrs;
 
-use tokio::runtime::Handle as RtHandle;
+use tokio::runtime::Handle;
 
 use crate::{
+	connection::{
+		ext::{emit_messages_as_events, ErrorEvent, MessageEvent},
+		ConnectionHandle,
+	},
 	messaging::NetMsg,
-	NetStage, connection::{ConnectionHandle, ext::{ConnectionEvent, ConnErrorEvent, emit_messages_as_events}},
+	NetStage,
 };
 
 pub struct ClientPlugin;
@@ -13,19 +17,20 @@ pub struct ClientPlugin;
 impl Plugin for ClientPlugin {
 	fn build(&self, app: &mut App) {
 		app.add_system_to_stage(NetStage::Receive, Client::event_system)
-		.insert_resource(Client { connection: None })
-		.add_event::<ConnectionEvent<Box<dyn NetMsg>>>()
-		.add_event::<ConnErrorEvent>()
-		;
+			.insert_resource(Client { connection: None })
+			.add_event::<MessageEvent<NetMsg>>()
+			.add_event::<ErrorEvent>();
 	}
 }
 
+#[derive(Resource)]
 pub struct Client {
-	pub connection: Option<ConnectionHandle<Box<dyn NetMsg>, Box<dyn NetMsg>>>,
+	pub connection: Option<ConnectionHandle<NetMsg, NetMsg>>,
+	// pub connection: Option<ConnectionHandle<(), ()>>,
 }
 
 impl Client {
-	pub fn connect<A: ToSocketAddrs + Send + Sync + 'static>(&mut self, rt: RtHandle, addr: A) {
+	pub fn connect<A: ToSocketAddrs + Send + Sync + 'static>(&mut self, rt: Handle, addr: A) {
 		self.connection = Some(ConnectionHandle::connect(rt, addr));
 	}
 }
@@ -33,12 +38,12 @@ impl Client {
 impl Client {
 	pub fn event_system(
 		client: Res<Client>,
-		mut data_events: EventWriter<ConnectionEvent<Box<dyn NetMsg>>>,
-		mut error_events: EventWriter<ConnErrorEvent>,
+		mut connection_messages: EventWriter<MessageEvent<NetMsg>>,
+		mut connection_errors: EventWriter<ErrorEvent>,
 	) {
 		let Some(ref conn) = client.connection else {
 			return;
 		};
-		emit_messages_as_events(conn, &mut data_events, &mut error_events);
+		emit_messages_as_events(conn, &mut connection_messages, &mut connection_errors);
 	}
 }
