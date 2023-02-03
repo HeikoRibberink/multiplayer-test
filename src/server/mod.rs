@@ -1,6 +1,9 @@
-use std::sync::{
-	atomic::{AtomicBool, Ordering},
-	Arc,
+use std::{
+	net::SocketAddr,
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		Arc,
+	},
 };
 
 use async_channel::{unbounded, Receiver, RecvError, SendError, Sender};
@@ -14,10 +17,7 @@ use tokio::{
 	task::{JoinError, JoinHandle},
 };
 
-use crate::connection::{
-	ext::{self, ConnectedEvent},
-	ConnectionHandle, ConnectionId,
-};
+use crate::connection::{ConnectionHandle, ConnectionId};
 
 mod plugin;
 
@@ -31,7 +31,7 @@ where
 	pub connections: Arc<DashMap<ConnectionId, ConnectionHandle<S, R>>>,
 	running: Arc<AtomicBool>,
 	task: Option<JoinHandle<Result<(), ServerError>>>,
-	from_task: Receiver<ConnectedEvent>,
+	from_task: Receiver<(SocketAddr, ConnectionId)>,
 	rt: Handle,
 }
 
@@ -44,7 +44,7 @@ where
 		let connections = Arc::new(DashMap::new());
 		let running = Arc::new(AtomicBool::new(true));
 
-		let (to_handle, from_task) = unbounded::<ext::ConnectedEvent>();
+		let (to_handle, from_task) = unbounded::<(SocketAddr, ConnectionId)>();
 
 		let server = InternalServer {
 			connections: connections.clone(),
@@ -85,7 +85,7 @@ where
 		self.internal_disconnect_blocking()
 	}
 
-	pub fn try_recv(&self) -> Result<Option<ConnectedEvent>, ServerError> {
+	pub fn try_recv(&self) -> Result<Option<(SocketAddr, ConnectionId)>, ServerError> {
 		return match self.from_task.try_recv() {
 			Ok(val) => Ok(Some(val)),
 
@@ -95,7 +95,6 @@ where
 			},
 		};
 	}
-
 }
 
 impl<S, R> Drop for ServerHandle<S, R>
@@ -118,7 +117,7 @@ where
 	connections: Arc<DashMap<ConnectionId, ConnectionHandle<S, R>>>,
 	running: Arc<AtomicBool>,
 	rt: Handle,
-	to_handle: Sender<ConnectedEvent>,
+	to_handle: Sender<(SocketAddr, ConnectionId)>,
 }
 
 impl<S, R> InternalServer<S, R>
@@ -134,7 +133,7 @@ where
 
 		while let Ok((stream, addr)) = listener.accept().await {
 			let conn = ConnectionHandle::with_stream(self.rt.clone(), stream);
-			if let Err(_err) = self.to_handle.send(ConnectedEvent(addr, conn.uuid)).await {
+			if let Err(_err) = self.to_handle.send((addr, conn.uuid)).await {
 				// If the channel returns an error and running is true, unexpected disconnect.
 				if self.running.load(Ordering::Relaxed) {
 					return Err(ServerError::Disconnected);

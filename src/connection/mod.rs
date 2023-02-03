@@ -32,7 +32,7 @@ where
 	to_conn: Sender<S>,
 	from_conn: Receiver<R>,
 	pub uuid: ConnectionId,
-	active: Arc<AtomicBool>,
+	running: Arc<AtomicBool>,
 	runtime: Handle,
 	task: Option<JoinHandle<Result<(), ConnectionError>>>,
 }
@@ -49,12 +49,12 @@ where
 		let (to_conn, from_handle) = unbounded::<S>();
 		let (to_handle, from_conn) = unbounded::<R>();
 
-		let active = Arc::new(AtomicBool::new(false));
+		let running = Arc::new(AtomicBool::new(true));
 
 		let connection = Connection {
 			to_handle,
 			from_handle,
-			active: active.clone(),
+			running: running.clone(),
 		};
 
 		let task = Some(rt.spawn(connection.connect(addr)));
@@ -65,7 +65,7 @@ where
 			to_conn,
 			from_conn,
 			uuid,
-			active,
+			running,
 			runtime: rt.clone(),
 			task,
 		}
@@ -75,12 +75,12 @@ where
 		let (to_conn, from_handle) = unbounded::<S>();
 		let (to_handle, from_conn) = unbounded::<R>();
 
-		let active = Arc::new(AtomicBool::new(false));
+		let running = Arc::new(AtomicBool::new(true));
 
 		let connection = Connection {
 			to_handle,
 			from_handle,
-			active: active.clone(),
+			running: running.clone(),
 		};
 
 		let task = Some(rt.spawn(connection.run(stream)));
@@ -91,7 +91,7 @@ where
 			to_conn,
 			from_conn,
 			uuid,
-			active,
+			running,
 			runtime: rt.clone(),
 			task,
 		}
@@ -107,7 +107,7 @@ where
 	}
 
 	fn internal_disconnect(&self) -> Result<(), ConnectionError> {
-		self.active.store(false, Ordering::Relaxed);
+		self.running.store(false, Ordering::Relaxed);
 		if !(self.to_conn.close() & self.from_conn.close()) {
 			return Err(ConnectionError::Disconnected);
 		};
@@ -123,8 +123,8 @@ where
 		Ok(())
 	}
 
-	pub fn is_active(&self) -> bool {
-		self.active.load(Ordering::Relaxed)
+	pub fn is_running(&self) -> bool {
+		self.running.load(Ordering::Relaxed)
 	}
 
 	pub fn try_recv(&self) -> Result<Option<R>, ConnectionError> {
@@ -145,7 +145,7 @@ where
 	for<'de> R: Deserialize<'de> + Send + 'static,
 {
 	fn drop(&mut self) {
-		if !self.active.load(Ordering::Relaxed) {
+		if !self.running.load(Ordering::Relaxed) {
 			self.internal_disconnect_blocking(); //TODO: how should the connection be ended?
 		}
 	}
@@ -158,7 +158,7 @@ where
 {
 	to_handle: Sender<R>,
 	from_handle: Receiver<S>,
-	active: Arc<AtomicBool>,
+	running: Arc<AtomicBool>,
 }
 
 impl<S, R> Connection<S, R>
@@ -172,8 +172,6 @@ where
 
 		let mut read = BufReader::new(read);
 		let mut write = BufWriter::new(write);
-
-		self.active.store(true, Ordering::Relaxed);
 
 		//Spawn listening and write tasks.
 		let output = tokio::select!(
@@ -216,10 +214,10 @@ where
 		&self,
 		write: &mut BufWriter<OwnedWriteHalf>,
 	) -> Result<(), ConnectionError> {
-		while self.active.load(Ordering::Relaxed) {
+		while self.running.load(Ordering::Relaxed) {
 			let Ok(msg) = self.from_handle.recv().await else {
-				// If the channel returns an error and active is true, error.
-				if self.active.load(Ordering::Relaxed) {
+				// If the channel returns an error and running is true, error.
+				if self.running.load(Ordering::Relaxed) {
 					return Err(ConnectionError::Disconnected)
 				}
 				// Otherwise, the handler has signaled a disconnect.
@@ -237,13 +235,13 @@ where
 		&self,
 		read: &mut BufReader<OwnedReadHalf>,
 	) -> Result<(), ConnectionError> {
-		while self.active.load(Ordering::Relaxed) {
+		while self.running.load(Ordering::Relaxed) {
 			match messaging::recv_msg(read).await {
 				Ok(bytes) => {
 					let data: R = postcard::from_bytes(&*bytes)?;
 					if let Err(_err) = self.to_handle.send(data).await {
-						// If the channel returns an error and active is true, error.
-						if self.active.load(Ordering::Relaxed) {
+						// If the channel returns an error and running is true, error.
+						if self.running.load(Ordering::Relaxed) {
 							return Err(ConnectionError::Disconnected);
 						}
 						// Otherwise, the handler has signaled a disconnect.
@@ -260,7 +258,7 @@ where
 	}
 
 	fn stop(&self) -> Result<(), ConnectionError> {
-		self.active.store(false, Ordering::Relaxed);
+		self.running.store(false, Ordering::Relaxed);
 		if !(self.to_handle.close() & self.from_handle.close()) {
 			return Err(ConnectionError::Disconnected);
 		};

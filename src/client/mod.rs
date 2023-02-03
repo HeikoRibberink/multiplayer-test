@@ -5,7 +5,7 @@ use tokio::runtime::Handle;
 
 use crate::{
 	connection::{
-		ext::{emit_messages_as_events, ErrorEvent, MessageEvent},
+		ext::{emit_messages_as_events, Event},
 		ConnectionHandle,
 	},
 	messaging::NetMsg,
@@ -18,8 +18,7 @@ impl Plugin for ClientPlugin {
 	fn build(&self, app: &mut App) {
 		app.add_system_to_stage(NetStage::Receive, Client::event_system)
 			.insert_resource(Client { connection: None })
-			.add_event::<MessageEvent<NetMsg>>()
-			.add_event::<ErrorEvent>();
+			.add_event::<Event<NetMsg>>();
 	}
 }
 
@@ -38,12 +37,11 @@ impl Client {
 impl Client {
 	pub fn event_system(
 		client: Res<Client>,
-		mut connection_messages: EventWriter<MessageEvent<NetMsg>>,
-		mut connection_errors: EventWriter<ErrorEvent>,
+		mut eventwriter: EventWriter<Event<NetMsg>>,
 	) {
 		let Some(ref conn) = client.connection else {
 			return;
 		};
-		emit_messages_as_events(conn, &mut connection_messages, &mut connection_errors);
+		emit_messages_as_events(conn, &mut eventwriter);
 	}
 }

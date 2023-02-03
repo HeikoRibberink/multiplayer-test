@@ -6,16 +6,21 @@ use serde::{Deserialize, Serialize};
 use super::{ConnectionError, ConnectionHandle, ConnectionId};
 
 #[derive(Debug)]
-pub struct ErrorEvent(pub ConnectionError, pub ConnectionId);
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct ConnectedEvent(pub SocketAddr, pub ConnectionId);
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct MessageEvent<R>(pub R, pub ConnectionId);
+pub enum Event<R> {
+	Message(R, ConnectionId),
+	Connected(SocketAddr, ConnectionId),
+	Error(ConnectionError, ConnectionId),
+}
+
+impl<R> From<(SocketAddr, ConnectionId)> for Event<R> {
+	fn from(value: (SocketAddr, ConnectionId)) -> Self {
+		Self::Connected(value.0, value.1)
+	}
+}
 
 pub fn emit_messages_as_events<S, R>(
 	handle: &ConnectionHandle<S, R>,
-	connection_messages: &mut EventWriter<MessageEvent<R>>,
-	connection_errors: &mut EventWriter<ErrorEvent>,
+	eventwriter: &mut EventWriter<Event<R>>,
 ) where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + Sync + 'static,
@@ -26,9 +31,9 @@ pub fn emit_messages_as_events<S, R>(
 			let Some(val) = opt else {
 				break;
 			};
-			connection_messages.send(MessageEvent(val, handle.uuid));
+			eventwriter.send(Event::Message(val, handle.uuid));
 		} else if let Err(err) = recv {
-			connection_errors.send(ErrorEvent(err, handle.uuid));
+			eventwriter.send(Event::Error(err, handle.uuid));
 			break;
 		}
 	}
