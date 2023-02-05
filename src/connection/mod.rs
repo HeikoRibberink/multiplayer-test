@@ -42,7 +42,7 @@ where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + 'static,
 {
-	pub fn connect<A>(rt: Handle, addr: A) -> ConnectionHandle<S, R>
+	pub fn connect<A>(addr: A, rt: Handle) -> ConnectionHandle<S, R>
 	where
 		A: ToSocketAddrs + Send + 'static,
 	{
@@ -71,7 +71,7 @@ where
 		}
 	}
 
-	pub fn with_stream(rt: Handle, stream: TcpStream) -> ConnectionHandle<S, R> {
+	pub fn with_stream(stream: TcpStream, rt: Handle) -> ConnectionHandle<S, R> {
 		let (to_conn, from_handle) = unbounded::<S>();
 		let (to_handle, from_conn) = unbounded::<R>();
 
@@ -224,7 +224,6 @@ where
 				break;
 			};
 			let bytes = postcard::to_stdvec(&msg)?;
-
 			messaging::send_msg(write, bytes).await?;
 		}
 

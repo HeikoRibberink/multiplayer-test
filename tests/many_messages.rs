@@ -1,88 +1,116 @@
 #![cfg(test)]
-use bevy::log::{Level, LogPlugin};
+use assert_in_order::*;
+use bevy::log::{self, Level, LogPlugin};
 use bevy::{app::AppExit, prelude::*};
-use multiplayer_test::connection::ConnectionHandle;
-use multiplayer_test::connection::ext::{ConnectedEvent, MessageEvent};
-use multiplayer_test::messaging::NetMsg;
-use multiplayer_test::server::{Server, ServerHandle, ServerPlugin};
+use multiplayer_test::client::FromServer;
+use multiplayer_test::connection::ext::Event;
+use multiplayer_test::server::{FromClient, Server, ServerPlugin};
 use multiplayer_test::{
 	self,
 	client::{Client, ClientPlugin},
-	connection::{ext::ErrorEvent, ConnectionError},
+	connection::ConnectionError,
 	MultiplayerPlugin, RuntimeResource,
 };
-use assert_in_order::*;
 
 in_order_init!(TEST);
 
 #[test]
 fn many_messages() -> Result<(), Box<dyn std::error::Error>> {
 	let rt = tokio::runtime::Builder::new_multi_thread()
-		.worker_threads(1)
+		// .worker_threads(1)
 		.enable_io()
 		.build()?;
 
 	App::new()
 		.add_plugins(MinimalPlugins)
 		.add_plugin(LogPlugin {
-			level: Level::INFO,
+			level: Level::WARN,
 			..default()
 		})
 		.add_plugin(MultiplayerPlugin)
-		.add_plugin(ClientPlugin)
-		.add_plugin(ServerPlugin)
+		.add_plugin(ClientPlugin::<String, String>::default())
+		.add_plugin(ServerPlugin::<String, String>::default())
 		.insert_resource(RuntimeResource(rt))
 		.add_startup_system(setup)
-		.add_system(on_error)
-		.add_system(on_connect)
+		.add_system(client_on_error)
+		.add_system(server_on_connect)
+		.add_system(client_on_connect)
+		.add_system(server_on_msg)
 		.run();
 	Ok(())
 }
 
-pub fn setup(mut client: ResMut<Client>, mut server: ResMut<Server>, rt: Res<RuntimeResource>) {
+pub fn setup(
+	mut client: ResMut<Client<String, String>>,
+	mut server: ResMut<Server<String, String>>,
+	rt: Res<RuntimeResource>,
+) {
 	let addr = "127.0.0.1:8080";
 	info!("Binding to {}", addr);
 	in_order!(TEST: binding);
-	server.server = Some(ServerHandle::bind(rt.handle().clone(), addr));
+	server.bind(addr, rt.handle().clone());
 	info!("Connecting to {}", addr);
 	in_order!(TEST: connecting after binding);
-	client.connection = Some(ConnectionHandle::connect(rt.handle().clone(), addr));
-	// client.connection.as_mut().unwrap().send_blocking()
+	client.connect(addr, rt.handle().clone());
 }
 
-pub fn on_connect(mut events: EventReader<ConnectedEvent>, mut server: ResMut<Server>) {
-	for event in events.iter() {
-		println!("Client connected: {:?}", event.0);
-		in_order!(TEST: connected after connecting);
-	}
-}
-
-pub fn on_msg(
-	mut events: EventReader<MessageEvent<NetMsg>>,
-	mut client: ResMut<Client>,
+pub fn server_on_connect(
+	mut connecteds: EventReader<FromClient<String>>,
 ) {
-	for event in events.iter() {
-		info!("Msg received: {:?}", event);
+	for event in connecteds.iter() {
+		let Event::Connected(addr, id) = &**event else {
+			continue
+		};
+		info!("Client {} connected: {:?}", id, &addr);
+		// server.connections.remove(&id);
 	}
 }
 
-pub fn on_error(
-	mut events: EventReader<ErrorEvent>,
-	mut client: ResMut<Client>,
-	mut exit: EventWriter<AppExit>,
+pub fn server_on_msg(mut events: EventReader<FromClient<String>>, mut i: Local<u32>, mut exit: EventWriter<AppExit>) {
+	for event in events.iter() {
+		let Event::Message(msg, id) = &**event else {
+			continue;
+		};
+		log::debug!("Msg received from client {}: {:?}", id, msg);
+		// in_order!(TEST: receiving after sending);
+		*i += 1;
+		if *i >= 100 {
+			exit.send(AppExit);
+		}
+	}
+}
+
+pub fn client_on_connect(
+	mut connecteds: EventReader<FromServer<String>>,
+	client: Res<Client<String, String>>,
+) {
+	for event in connecteds.iter() {
+		let Event::Connected(addr, id) = &**event else {
+			continue;
+		};
+		info!("Client {} connected to server: {:?}", id, &addr);
+		in_order!(TEST: connected after connecting);
+		let client = (&*client).as_ref().unwrap();
+		in_order!(TEST: sending after connected);
+		for i in 0..100 {
+			client.send_blocking(format!("{i}")).unwrap(); //TODO: Messages are send, but never received...
+		}
+	}
+}
+
+pub fn client_on_error(
+	mut events: EventReader<FromServer<String>>,
 ) {
 	for ev in events.iter() {
-		match ev.0 {
+		let Event::Error(err, id) = &**ev else {
+			continue
+		};
+		match err {
 			ConnectionError::Disconnected => {
-				// info!("Client got disconnected.");
-				in_order!(TEST: disconnected after connected);
-				client.connection.take().unwrap();
-				// info!("Shutting down app.");
-				in_order!(TEST: shutdown after disconnected);
-				exit.send(AppExit);
+				panic!("Client {} got disconnected.", id);
 			}
 			_ => {
-				dbg!(ev);
+				dbg!(err);
 			}
 		}
 	}

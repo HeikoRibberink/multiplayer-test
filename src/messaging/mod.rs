@@ -100,6 +100,7 @@ where
 {
 	writer.write_u64_le(data.len() as u64).await?;
 	writer.write_all(&*data).await?;
+	writer.flush().await?;
 	Ok(())
 }
 

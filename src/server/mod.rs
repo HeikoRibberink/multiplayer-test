@@ -23,6 +23,7 @@ mod plugin;
 
 pub use plugin::*;
 
+#[derive(Debug)]
 pub struct ServerHandle<S, R>
 where
 	S: Serialize + Send + 'static,
@@ -31,29 +32,24 @@ where
 	pub connections: Arc<DashMap<ConnectionId, ConnectionHandle<S, R>>>,
 	running: Arc<AtomicBool>,
 	task: Option<JoinHandle<Result<(), ServerError>>>,
-	from_task: Receiver<(SocketAddr, ConnectionId)>,
-	rt: Handle,
+	from_task: Option<Receiver<(SocketAddr, ConnectionId)>>,
+	rt: Option<Handle>,
 }
+
+use ServerError::Disconnected;
 
 impl<S, R> ServerHandle<S, R>
 where
 	S: Serialize + Send + 'static,
 	for<'de> R: Deserialize<'de> + Send + Sync + 'static,
 {
-	pub fn bind<A: ToSocketAddrs + Sync + Send + 'static>(rt: Handle, addr: A) -> Self {
+	pub fn new() -> Self {
 		let connections = Arc::new(DashMap::new());
-		let running = Arc::new(AtomicBool::new(true));
+		let running = Arc::new(AtomicBool::new(false));
 
-		let (to_handle, from_task) = unbounded::<(SocketAddr, ConnectionId)>();
-
-		let server = InternalServer {
-			connections: connections.clone(),
-			running: running.clone(),
-			rt: rt.clone(),
-			to_handle,
-		};
-
-		let task = Some(rt.spawn(server.listen(addr)));
+		let task = None;
+		let from_task = None;
+		let rt = None;
 
 		Self {
 			connections,
@@ -64,9 +60,28 @@ where
 		}
 	}
 
+	pub fn bind<A: ToSocketAddrs + Sync + Send + 'static>(&mut self, addr: A, rt: Handle) {
+		let (to_handle, from_task) = unbounded::<(SocketAddr, ConnectionId)>();
+
+		let server = InternalServer {
+			connections: self.connections.clone(),
+			running: self.running.clone(),
+			rt: rt.clone(),
+			to_handle,
+		};
+
+		self.running.store(true, Ordering::Relaxed);
+
+		let task = Some(rt.spawn(server.listen(addr)));
+
+		self.task = task;
+		self.from_task = Some(from_task);
+		self.rt = Some(rt);
+	}
+
 	fn internal_disconnect_blocking(&mut self) -> Result<(), ServerError> {
 		self.internal_disconnect()?;
-		self.rt.block_on(async {
+		self.rt.as_ref().ok_or(Disconnected)?.block_on(async {
 			//Cancellation safety: should be safe as we don't care about any data that hasn't been send or received after waiting.
 			//Maybe use select! with a branch that waits for a specified time to not wait indefinitely
 			self.task.take().unwrap().await
@@ -75,8 +90,8 @@ where
 
 	fn internal_disconnect(&self) -> Result<(), ServerError> {
 		self.running.store(false, Ordering::Relaxed);
-		if !self.from_task.close() {
-			return Err(ServerError::Disconnected);
+		if !self.from_task.as_ref().ok_or(Disconnected)?.close() {
+			return Err(Disconnected);
 		};
 		return Ok(());
 	}
@@ -86,7 +101,7 @@ where
 	}
 
 	pub fn try_recv(&self) -> Result<Option<(SocketAddr, ConnectionId)>, ServerError> {
-		return match self.from_task.try_recv() {
+		return match self.from_task.as_ref().ok_or(Disconnected)?.try_recv() {
 			Ok(val) => Ok(Some(val)),
 
 			Err(err) => match err {
@@ -132,7 +147,7 @@ where
 		let listener = TcpListener::bind(addr).await.unwrap();
 
 		while let Ok((stream, addr)) = listener.accept().await {
-			let conn = ConnectionHandle::with_stream(self.rt.clone(), stream);
+			let conn = ConnectionHandle::with_stream(stream, self.rt.clone());
 			if let Err(_err) = self.to_handle.send((addr, conn.uuid)).await {
 				// If the channel returns an error and running is true, unexpected disconnect.
 				if self.running.load(Ordering::Relaxed) {
