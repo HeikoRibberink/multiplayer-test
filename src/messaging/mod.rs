@@ -9,7 +9,7 @@ use bevy::{
 	reflect::serde::{ReflectSerializer, UntypedReflectDeserializer},
 	utils::Uuid,
 };
-use serde::{de::DeserializeSeed, Deserialize, Serialize, __private::de};
+use serde::{de::DeserializeSeed, Deserialize, Serialize};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::TYPE_REGISTRY;

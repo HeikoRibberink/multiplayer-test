@@ -19,7 +19,7 @@ tokio = { version = "1.21.2", features = [
 	"rt",
 	"rt-multi-thread",
 	"macros",
-	"time",
+	# "time",
 ], default-features = false }
 erased-serde = "0.3.23"
 once_cell = "1.16.0"
@@ -34,8 +34,9 @@ assert-in-order = { version = "0.1.0", path = "assert-in-order" }
 lazy_static = "1.4.0"
 
 [workspace]
-members = ["multiplayer-test-macros", "assert-in-order"]
+members = ["multiplayer-test-macros", "assert-in-order", "test-game"]
 
 [dependencies.bevy]
 version = "0.9"
 features = ["dynamic"]
+default-features = false
